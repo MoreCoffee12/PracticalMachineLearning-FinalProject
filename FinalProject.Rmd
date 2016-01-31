@@ -1,0 +1,174 @@
+# Final project
+
+## Introduction
+
+In this project, we will use data from accelerometers on the 
+belt, forearm, arm, and dumbell of 6 participants to predict the 
+manner in which they did the exercise. This is the "classe" variable 
+in the training set. I will also use the prediction model to predict 
+20 different test cases.
+
+```{r echo=FALSE}
+rm(list=ls())
+library(caret)
+library(randomForest)
+library(rpart.plot)
+```
+
+## Exploratory Analysis
+
+Load the data. Looking through the data I saw there was some "#DIV/0" that I
+need to convert to NA
+```{r}
+dataIn <- read.csv("C:/Users/Brian/OneDrive/DataScience/PracticalMachineLearning/pml-training.csv", na.strings = c("NA", "#DIV/0!", ""))
+test <- read.csv("C:/Users/Brian/OneDrive/DataScience/PracticalMachineLearning/pml-testing.csv", na.strings = c("NA", "#DIV/0!", ""))
+```
+
+Look through the data
+```{r echo=TRUE}
+str(dataIn[1:5,1:20])
+```
+
+There are a lot of columns with "NA" so let's get rid of those
+```{r}
+na_cols <- apply(!is.na(dataIn), 2, sum) > (nrow(dataIn)-1)
+dataIn <- dataIn[, na_cols]
+test <- test[, na_cols]
+```
+
+We are not going to care about username, timestamp and other data in the first six 
+columns since this is not information about the motion
+```{r}
+dataIn <- dataIn[, -(1:6)]
+test <- test[, -(1:6)]
+```
+
+In this approach I will use a few different approaches on the training data set. I'll
+then test them on the validation data set and pick the one that is most accurate.
+Begin by splitting up the 70% data into train and 30% to validation sets.
+```{r}
+idxTrain <- createDataPartition(y=dataIn$classe, p=0.70, list=FALSE);
+train <- dataIn[idxTrain,]
+val <- dataIn[-idxTrain,]
+```
+
+Some of the covariants have no variance (only a single value) and aren't
+useful for our modelling. This removes those columns. On my first run through
+this turned out to be zero so I added the if...then to work around this.
+```{r}
+nz_cols <- nearZeroVar(train)
+if( length(nz_cols) >0 ){
+
+  train <- train[, -nz_cols]
+  val <- val[, -nz_cols]
+  
+} else {
+  cat("No near zero variance columns")
+}
+```
+
+## Data preprocessing and selection
+
+There are still a lot of covariates here. I found an interesting post where 
+random forests are used to select the most important variables:
+
+http://www.r-bloggers.com/variable-importance-plot-and-variable-selection/
+
+We will use the randomForest package and plot the variable importance of the 
+covariants.
+
+```{r}
+fitModel <- randomForest(classe~., data=train, importance=TRUE, ntree=100)
+varImpPlot(fitModel)
+```
+
+We will select the top 10 covariates using this code:
+```{r}
+rankTable <- varImp(fitModel)
+rankTable$total <- rankTable$A+rankTable$B+rankTable$C+rankTable$D+rankTable$E
+rankTable <- rankTable[order(-rankTable$total),]
+rankRows <- rownames(rankTable[1:10,])
+table(rankRows)
+```
+
+Although the covariants are important there could still be correlation
+between them. We will check with the correlation matrix. We'll set the diagonal
+elements to zero (these are the self correlated values and are always unity), then
+pick the largest values. We'll start with a threshold of 75%.
+````{r}
+rankCols <- c(rankRows[1], rankRows[2], rankRows[3], rankRows[4], rankRows[5], rankRows[6], rankRows[7], rankRows[8], rankRows[9], rankRows[10])
+corMat <- cor(train[,rankCols])
+diag(corMat) <- 0
+which(abs(corMat)>0.75, arr.ind=TRUE)
+```
+
+It looks like both `yaw_belt` and `roll_belt` are strongly correlated. Both of these are
+also important, but looks like we'll need to eliminate one or combine using PCA. 
+Since PCA is computationally intensive we will just eliminate one. But which one?
+We can use a tree classifier to see which one is more important.
+```{r}
+fitModel <- rpart(classe~., data=train, method="class")
+prp(fitModel)
+```
+The variable `roll_belt` comes out on top se we will keep it and eliminate `yaw_belt`
+```{r}
+rankCols <- rankCols[-grep("yaw_belt", rankCols)]
+```
+
+## Fitting the data
+Using the covariates found above we will construct the formula and call the
+train command from caret. If there is a previous run, just load the data
+rather than re-running the train command.
+
+```{r}
+set.seed(514159)
+strForm <- "classe~"
+for (idx in 1:(length(rankCols)-1)){
+  strForm <- paste(strForm,rankCols[idx],"+")
+}
+strForm <- paste(strForm,rankCols[length(rankCols)])
+
+strFinalModelPath = "finalModel.RDS"
+
+if( file.exists(strFinalModelPath)){
+  
+  cat("Loading a previous data set")
+  finalModel <- readRDS(strFinalModelPath)
+  
+} else {
+
+  finalModel <- train(as.formula(strForm), data=train, method ="rf",
+                    trControl=trainControl(method="cv",number=2),
+                    prox = TRUE,
+                    verbose = TRUE,
+                    allowParallel = TRUE)
+  
+}
+
+
+```
+
+That took a long time calculate. We'll save off the model so that we can load it
+rather than calculate it each time
+```{r}
+saveRDS(finalModel, strFinalModelPath)
+```
+
+With the model built for the training set, we can see how it performs on the
+validation data set.
+```{r}
+results <- predict(finalModel, newdata=val)
+confMat <- confusionMatrix(results, val$classe)
+confMat
+```
+That was a good result, an overall accuracy over 99%. That is 
+probably good enough to try on the 20 question prediction quiz.
+
+## Coursera results
+
+```{r}
+resultsCoursera <- predict(finalModel, newdata = test)
+print(resultsCoursera)
+```
+
+These results scored 100% on the final test. I think the model is pretty good.
